@@ -9,7 +9,10 @@ const supabase = createClient(
 export async function POST(req: NextRequest) {
   try {
     const { scanId, resultData } = await req.json();
-    await supabase.from('receipt_scans').update({ status: 'completed', result_data: resultData }).eq('id', scanId);
+    await supabase.from('receipt_scans').update({ 
+      status: 'completed', 
+      result_data: resultData 
+    }).eq('id', scanId);
     return NextResponse.json({ success: true });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
