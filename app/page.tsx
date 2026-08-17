@@ -48,17 +48,23 @@ export default function Home() {
     setScansQueue(data || []);
   }
 
-  async function fetchBalances() {
+async function fetchBalances() {
     const { data } = await supabase.from('debt_shares').select(`
       amount_owed, debtor:debtor_id ( name, is_vegan ), expense:expense_id ( payer:payer_id ( name, is_vegan ) )
     `);
     const aggregatedBalances: Record<string, any> = {};
-    data?.forEach(b => {
-      const key = `${b.debtor.name}-${b.expense.payer.name}`;
+    
+    // הוספנו כאן (b: any) וסימני שאלה כדי ש-TypeScript לא יקרוס
+    data?.forEach((b: any) => {
+      const debtorName = b.debtor?.name || 'לא ידוע';
+      const payerName = b.expense?.payer?.name || 'לא ידוע';
+      const key = `${debtorName}-${payerName}`;
+      
       if (!aggregatedBalances[key]) aggregatedBalances[key] = { ...b, amount_owed: 0 };
       aggregatedBalances[key].amount_owed += Number(b.amount_owed);
     });
-    setBalances(Object.values(aggregatedBalances).filter(b => b.amount_owed > 0));
+    
+    setBalances(Object.values(aggregatedBalances).filter((b: any) => b.amount_owed > 0));
   }
 
   async function fetchHistory() {
