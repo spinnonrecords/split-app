@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 
+// פקודה מיוחדת ל-Vercel: תן לשרת לעבוד עד 60 שניות לפני שאתה קוטע אותו (במקום 10-15)
+export const maxDuration = 60;
+
 // חיבור ל-Supabase מאחורי הקלעים
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -26,7 +29,7 @@ export async function POST(req: NextRequest) {
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
     const mimeType = imageRes.headers.get('content-type') || 'image/jpeg';
 
-    // 4. שולחים לג'מיני (בדיוק כמו קודם)
+    // 4. שולחים לג'מיני
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     const ai = new GoogleGenAI({ apiKey });
 
@@ -36,7 +39,7 @@ export async function POST(req: NextRequest) {
 { "store_name": "שם הסופר", "items": [ { "name": "שם המוצר", "price": 12.5, "category": "vegan" } ], "total_amount": 100 }`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-flash-latest', // או המודל שעבד לך סופית בבדיקות הקודמות
+      model: 'gemini-flash-latest', 
       contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { data: base64Data, mimeType } }] }],
       config: { responseMimeType: 'application/json' }
     });
