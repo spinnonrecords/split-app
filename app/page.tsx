@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { calculateSplits, Roommate, ReceiptItem } from '@/lib/split-logic';
-import { Upload, ShoppingBag, DollarSign, History, Trash2, Image as ImageIcon, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Upload, ShoppingBag, DollarSign, History, Trash2, Image as ImageIcon, Loader2, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function Home() {
   const [roommates, setRoommates] = useState<Roommate[]>([]);
@@ -12,7 +12,6 @@ export default function Home() {
   const [isUploading, setIsUploading] = useState(false);
   const [scansQueue, setScansQueue] = useState<any[]>([]);
   
-  // State for active review (when clicking on a completed scan)
   const [activeScanId, setActiveScanId] = useState<string | null>(null);
   const [storeName, setStoreName] = useState('');
   const [items, setItems] = useState<ReceiptItem[]>([]);
@@ -27,7 +26,6 @@ export default function Home() {
     fetchHistory();
     fetchQueue();
 
-    // דגימה כל 5 שניות לבדוק אם קבלה סיימה עיבוד ברקע
     const interval = setInterval(fetchQueue, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -41,37 +39,25 @@ export default function Home() {
   }
 
   async function fetchQueue() {
-    const { data } = await supabase
-      .from('receipt_scans')
-      .select('*, payer:payer_id ( name )')
-      .order('created_at', { ascending: false });
+    const { data } = await supabase.from('receipt_scans').select('*, payer:payer_id ( name )').order('created_at', { ascending: false });
     setScansQueue(data || []);
   }
 
-async function fetchBalances() {
-    const { data } = await supabase.from('debt_shares').select(`
-      amount_owed, debtor:debtor_id ( name, is_vegan ), expense:expense_id ( payer:payer_id ( name, is_vegan ) )
-    `);
+  async function fetchBalances() {
+    const { data } = await supabase.from('debt_shares').select(`amount_owed, debtor:debtor_id ( name, is_vegan ), expense:expense_id ( payer:payer_id ( name, is_vegan ) )`);
     const aggregatedBalances: Record<string, any> = {};
-    
-    // הוספנו כאן (b: any) וסימני שאלה כדי ש-TypeScript לא יקרוס
     data?.forEach((b: any) => {
       const debtorName = b.debtor?.name || 'לא ידוע';
       const payerName = b.expense?.payer?.name || 'לא ידוע';
       const key = `${debtorName}-${payerName}`;
-      
       if (!aggregatedBalances[key]) aggregatedBalances[key] = { ...b, amount_owed: 0 };
       aggregatedBalances[key].amount_owed += Number(b.amount_owed);
     });
-    
     setBalances(Object.values(aggregatedBalances).filter((b: any) => b.amount_owed > 0));
   }
 
   async function fetchHistory() {
-    const { data } = await supabase
-      .from('expenses')
-      .select(`id, created_at, store_name, total_amount, receipt_image_url, payer:payer_id ( name, is_vegan ), items:expense_items ( name, price, category )`)
-      .order('created_at', { ascending: false });
+    const { data } = await supabase.from('expenses').select(`id, created_at, store_name, total_amount, receipt_image_url, payer:payer_id ( name, is_vegan ), items:expense_items ( name, price, category )`).order('created_at', { ascending: false });
     setHistory(data || []);
   }
 
@@ -80,8 +66,6 @@ async function fetchBalances() {
     if (!file || !payerId) return;
 
     setIsUploading(true);
-    
-    // 1. העלאת התמונה ל-Storage
     const fileExt = file.name.split('.').pop();
     const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
     const { error: uploadError } = await supabase.storage.from('receipts').upload(fileName, file);
@@ -93,13 +77,7 @@ async function fetchBalances() {
     }
 
     const { data: { publicUrl } } = supabase.storage.from('receipts').getPublicUrl(fileName);
-
-    // 2. יצירת רשומה בתור (Queue)
-    const { data: scanRecord, error: dbError } = await supabase.from('receipt_scans').insert({
-      payer_id: payerId,
-      image_url: publicUrl,
-      status: 'pending'
-    }).select().single();
+    const { data: scanRecord, error: dbError } = await supabase.from('receipt_scans').insert({ payer_id: payerId, image_url: publicUrl, status: 'pending' }).select().single();
 
     if (dbError || !scanRecord) {
       alert('שגיאה ביצירת תור סריקה');
@@ -107,23 +85,22 @@ async function fetchBalances() {
       return;
     }
 
-    // 3. שליחת בקשה "שגר ושכח"
-    fetch('/api/process-scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scanId: scanRecord.id }),
-    }).catch(console.error); 
-
+    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId: scanRecord.id }) }).catch(console.error); 
     setIsUploading(false);
     fetchQueue(); 
-    alert('הקבלה הועלתה ונכנסה לתור הסריקה! תוכל לחזור אליה כשתהיה מוכנה.');
   }
+
+  // פונקציה חדשה ששולחת סריקה מחדש אם היא נכשלה בעבר
+  const retryScan = async (scanId: string) => {
+    await supabase.from('receipt_scans').update({ status: 'pending' }).eq('id', scanId);
+    fetchQueue();
+    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId }) }).catch(console.error);
+  };
 
   const reviewScan = (scan: any) => {
     setActiveScanId(scan.id);
     setPayerId(scan.payer_id);
     setReceiptImageUrl(scan.image_url);
-    
     if (scan.result_data) {
       setStoreName(scan.result_data.store_name || 'קנייה בסופר');
       setItems(scan.result_data.items || []);
@@ -145,25 +122,14 @@ async function fetchBalances() {
 
   async function saveExpense() {
     if (!payerId || items.length === 0 || !activeScanId) return;
-
     const totalAmount = items.reduce((sum, item) => sum + Number(item.price), 0);
     const { debts } = calculateSplits(items, roommates, payerId);
 
-    const { data: expense, error } = await supabase.from('expenses').insert({
-      payer_id: payerId, store_name: storeName, total_amount: totalAmount, receipt_image_url: receiptImageUrl
-    }).select().single();
-
+    const { data: expense, error } = await supabase.from('expenses').insert({ payer_id: payerId, store_name: storeName, total_amount: totalAmount, receipt_image_url: receiptImageUrl }).select().single();
     if (error || !expense) return alert('שגיאה בשמירת ההוצאה');
 
-    await supabase.from('expense_items').insert(
-      items.map(item => ({ expense_id: expense.id, name: item.name, price: item.price, category: item.category }))
-    );
-
-    await supabase.from('debt_shares').insert(
-      debts.map(d => ({ expense_id: expense.id, debtor_id: d.debtor_id, amount_owed: d.amount }))
-    );
-
-    // מחיקת הקבלה מהתור אחרי אישור
+    await supabase.from('expense_items').insert(items.map(item => ({ expense_id: expense.id, name: item.name, price: item.price, category: item.category })));
+    await supabase.from('debt_shares').insert(debts.map(d => ({ expense_id: expense.id, debtor_id: d.debtor_id, amount_owed: d.amount })));
     await supabase.from('receipt_scans').delete().eq('id', activeScanId);
 
     alert('✅ הקבלה אושרה ונשמרה בהצלחה!');
@@ -176,9 +142,7 @@ async function fetchBalances() {
 
   async function deleteExpense(expenseId: string) {
     if (!confirm('האם למחוק הוצאה זו? פעולה זו תבטל את החובות הקשורים אליה.')) return;
-    
     await supabase.from('expenses').delete().eq('id', expenseId);
-    
     fetchBalances();
     fetchHistory();
   }
@@ -191,7 +155,6 @@ async function fetchBalances() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-        {/* העלאת קבלה חדשה */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 lg:col-span-2">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <Upload className="w-5 h-5 text-emerald-600" /> זרוק קבלה לתור
@@ -212,7 +175,6 @@ async function fetchBalances() {
           {isUploading && <p className="text-emerald-600 font-medium animate-pulse text-sm">מעלה את התמונה לשרת...</p>}
         </section>
 
-        {/* תור קבלות */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 bg-slate-50/50">
           <h2 className="text-lg font-semibold mb-4 flex items-center justify-between">
             תור סריקות
@@ -226,10 +188,16 @@ async function fetchBalances() {
                 <div key={scan.id} className="p-3 bg-white rounded-xl border border-slate-200 shadow-sm flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <p className="text-xs text-slate-500 mb-1">{new Date(scan.created_at).toLocaleTimeString('he-IL')} • {scan.payer?.name}</p>
+                    
                     {scan.status === 'pending' || scan.status === 'processing' ? (
                       <div className="flex items-center gap-1 text-blue-600 text-sm font-medium"><Loader2 className="w-4 h-4 animate-spin" /> סורק...</div>
                     ) : scan.status === 'error' ? (
-                      <div className="flex items-center gap-1 text-rose-600 text-sm font-medium"><AlertCircle className="w-4 h-4" /> שגיאה בסריקה</div>
+                      <div className="flex items-center gap-2">
+                        <span className="flex items-center gap-1 text-rose-600 text-sm font-medium"><AlertCircle className="w-4 h-4" /> שגיאה בסריקה</span>
+                        <button onClick={() => retryScan(scan.id)} className="text-xs bg-rose-100 text-rose-700 hover:bg-rose-200 px-2 py-1 rounded-md transition flex items-center gap-1">
+                          <RefreshCw className="w-3 h-3" /> נסה שוב
+                        </button>
+                      </div>
                     ) : (
                       <button onClick={() => reviewScan(scan)} className="flex items-center gap-1 text-emerald-600 hover:text-emerald-700 text-sm font-bold transition"><CheckCircle2 className="w-4 h-4" /> סריקה מוכנה! לחץ לאישור</button>
                     )}
@@ -242,7 +210,6 @@ async function fetchBalances() {
         </section>
       </div>
 
-      {/* אזור אישור קבלה שסיימה סריקה */}
       {activeScanId && items.length > 0 && (
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-emerald-200 ring-2 ring-emerald-50 mb-8">
           <div className="flex justify-between items-center mb-6">
@@ -279,7 +246,6 @@ async function fetchBalances() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        {/* מאזן חובות */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <DollarSign className="w-5 h-5 text-emerald-600" />
@@ -302,7 +268,6 @@ async function fetchBalances() {
           )}
         </section>
 
-        {/* היסטוריית הוצאות */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <History className="w-5 h-5 text-emerald-600" />

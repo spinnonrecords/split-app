@@ -2,34 +2,33 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 
-// פקודה מיוחדת ל-Vercel: תן לשרת לעבוד עד 60 שניות לפני שאתה קוטע אותו (במקום 10-15)
 export const maxDuration = 60;
 
-// חיבור ל-Supabase מאחורי הקלעים
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
 export async function POST(req: NextRequest) {
+  let currentScanId = null;
+
   try {
-    const { scanId } = await req.json();
-    if (!scanId) return NextResponse.json({ error: 'חסר ID' }, { status: 400 });
+    // קריאה של הבקשה פעם אחת בלבד (זה מה שגרם לקריסה קודם!)
+    const body = await req.json();
+    currentScanId = body.scanId;
 
-    // 1. מעדכנים סטטוס ל"בעיבוד"
-    await supabase.from('receipt_scans').update({ status: 'processing' }).eq('id', scanId);
+    if (!currentScanId) return NextResponse.json({ error: 'חסר ID' }, { status: 400 });
 
-    // 2. שולפים את נתוני הקבלה מהתור
-    const { data: scanItem } = await supabase.from('receipt_scans').select('*').eq('id', scanId).single();
+    await supabase.from('receipt_scans').update({ status: 'processing' }).eq('id', currentScanId);
+
+    const { data: scanItem } = await supabase.from('receipt_scans').select('*').eq('id', currentScanId).single();
     if (!scanItem) throw new Error('הקבלה לא נמצאה');
 
-    // 3. מורידים את התמונה מהקישור של Supabase כדי לשלוח ל-Gemini
     const imageRes = await fetch(scanItem.image_url);
     const arrayBuffer = await imageRes.arrayBuffer();
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
     const mimeType = imageRes.headers.get('content-type') || 'image/jpeg';
 
-    // 4. שולחים לג'מיני
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     const ai = new GoogleGenAI({ apiKey });
 
@@ -50,20 +49,21 @@ export async function POST(req: NextRequest) {
 
     const parsedData = JSON.parse(text);
 
-    // 5. שומרים את התוצאה במסד הנתונים ומשנים סטטוס ל"הושלם"
     await supabase.from('receipt_scans').update({
       status: 'completed',
       result_data: parsedData
-    }).eq('id', scanId);
+    }).eq('id', currentScanId);
 
     return NextResponse.json({ success: true });
 
   } catch (error: any) {
     console.error('Background Process Error:', error);
-    // במקרה של שגיאה, נעדכן את הסטטוס כדי שהמשתמש ידע שמשהו השתבש
-    const { scanId } = await req.json().catch(() => ({}));
-    if (scanId) {
-      await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanId);
+    // עכשיו הקוד יכול לעדכן את המסד בביטחה שקרתה שגיאה
+    if (currentScanId) {
+      await supabase.from('receipt_scans').update({ 
+        status: 'error',
+        result_data: { error_message: error.message }
+      }).eq('id', currentScanId);
     }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
