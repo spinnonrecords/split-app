@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { calculateSplits, Roommate, ReceiptItem } from '@/lib/split-logic';
-import { Upload, ShoppingBag, DollarSign, History, Trash2, Image as ImageIcon, Loader2, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import { Upload, ShoppingBag, DollarSign, History, Trash2, Image as ImageIcon, Loader2, CheckCircle2, AlertCircle, RefreshCw, Edit3 } from 'lucide-react';
 
 export default function Home() {
   const [roommates, setRoommates] = useState<Roommate[]>([]);
@@ -16,6 +16,13 @@ export default function Home() {
   const [storeName, setStoreName] = useState('');
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [receiptImageUrl, setReceiptImageUrl] = useState<string | null>(null);
+
+  // מצב עריכת קניה קיימת מההיסטוריה
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [editStoreName, setEditStoreName] = useState('');
+  const [editItems, setEditItems] = useState<any[]>([]);
+  const [editReceiptUrl, setEditReceiptUrl] = useState<string | null>(null);
+  const [editPayerId, setEditPayerId] = useState('');
   
   const [balances, setBalances] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
@@ -57,7 +64,7 @@ export default function Home() {
   }
 
   async function fetchHistory() {
-    const { data } = await supabase.from('expenses').select(`id, created_at, store_name, total_amount, receipt_image_url, payer:payer_id ( name, is_vegan ), items:expense_items ( name, price, category )`).order('created_at', { ascending: false });
+    const { data } = await supabase.from('expenses').select(`id, created_at, store_name, total_amount, receipt_image_url, payer_id, payer:payer_id ( name, is_vegan ), items:expense_items ( id, name, price, category )`).order('created_at', { ascending: false });
     setHistory(data || []);
   }
 
@@ -88,17 +95,14 @@ export default function Home() {
     setIsUploading(false);
     fetchQueue(); 
 
-    // שליחת הבקשה לשרת עם מנגנון פיקוח של הדפדפן
     fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId: scanRecord.id }) })
       .then(async (res) => {
         if (!res.ok) {
-          // אם השרת החזיר שגיאה 500 (גוגל קרס), הדפדפן מתערב ומעדכן את הסטטוס באותו רגע
           await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
           fetchQueue();
         }
       })
       .catch(async () => {
-        // במקרה של קריסה מוחלטת
         await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
         fetchQueue();
       });
@@ -108,7 +112,6 @@ export default function Home() {
     await supabase.from('receipt_scans').update({ status: 'pending' }).eq('id', scanId);
     fetchQueue();
     
-    // אותו מנגנון פיקוח גם בניסיון חוזר
     fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId }) })
       .then(async (res) => {
         if (!res.ok) {
@@ -168,6 +171,72 @@ export default function Home() {
   async function deleteExpense(expenseId: string) {
     if (!confirm('האם למחוק הוצאה זו? פעולה זו תבטל את החובות הקשורים אליה.')) return;
     await supabase.from('expenses').delete().eq('id', expenseId);
+    if (editingExpenseId === expenseId) setEditingExpenseId(null);
+    fetchBalances();
+    fetchHistory();
+  }
+
+  // פתיחת קניה קיימת לעריכה מההיסטוריה
+  const startEditingExpense = (expense: any) => {
+    setEditingExpenseId(expense.id);
+    setEditStoreName(expense.store_name);
+    setEditPayerId(expense.payer_id);
+    setEditReceiptUrl(expense.receipt_image_url);
+    setEditItems(expense.items ? [...expense.items] : []);
+  };
+
+  const updateEditItemCategory = (index: number, category: string) => {
+    const updated = [...editItems];
+    updated[index].category = category;
+    setEditItems(updated);
+  };
+
+  const updateEditItemPrice = (index: number, price: string) => {
+    const updated = [...editItems];
+    updated[index].price = price;
+    setEditItems(updated);
+  };
+
+  const updateEditItemName = (index: number, name: string) => {
+    const updated = [...editItems];
+    updated[index].name = name;
+    setEditItems(updated);
+  };
+
+  const removeEditItem = (index: number) => {
+    const updated = editItems.filter((_, i) => i !== index);
+    setEditItems(updated);
+  };
+
+  // שמירת השינויים בקניה קיימת (מחיקת חובות ישנים וחישוב מחדש)
+  async function saveEditedExpense() {
+    if (!editingExpenseId || editItems.length === 0) return;
+
+    const totalAmount = editItems.reduce((sum, item) => sum + Number(item.price), 0);
+    const { debts } = calculateSplits(editItems, roommates, editPayerId);
+
+    // 1. עדכון פרטי ההוצאה הראשית
+    await supabase.from('expenses').update({
+      store_name: editStoreName,
+      total_amount: totalAmount,
+      payer_id: editPayerId
+    }).eq('id', editingExpenseId);
+
+    // 2. מחיקת הפריטים הישנים והחובות הישנים של הקניה הזו
+    await supabase.from('expense_items').delete().eq('expense_id', editingExpenseId);
+    await supabase.from('debt_shares').delete().eq('expense_id', editingExpenseId);
+
+    // 3. הכנסת הפריטים המעודכנים והחובות החדשים
+    await supabase.from('expense_items').insert(
+      editItems.map(item => ({ expense_id: editingExpenseId, name: item.name, price: item.price, category: item.category }))
+    );
+
+    await supabase.from('debt_shares').insert(
+      debts.map(d => ({ expense_id: editingExpenseId, debtor_id: d.debtor_id, amount_owed: d.amount }))
+    );
+
+    alert('✅ הקניה עודכנה בהצלחה!');
+    setEditingExpenseId(null);
     fetchBalances();
     fetchHistory();
   }
@@ -235,6 +304,7 @@ export default function Home() {
         </section>
       </div>
 
+      {/* אזור אישור קבלה חדשה מהתור */}
       {activeScanId && items.length > 0 && (
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-emerald-200 ring-2 ring-emerald-50 mb-8">
           <div className="flex justify-between items-center mb-6">
@@ -266,6 +336,52 @@ export default function Home() {
           <div className="flex gap-3">
             <button onClick={() => setActiveScanId(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition">סגור בינתיים</button>
             <button onClick={saveExpense} className="flex-2 w-2/3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition shadow-sm">אשר קבלה וחלק חובות</button>
+          </div>
+        </section>
+      )}
+
+      {/* אזור עריכת קניה קיימת מההיסטוריה */}
+      {editingExpenseId && (
+        <section className="bg-white p-6 rounded-2xl shadow-sm border border-blue-200 ring-2 ring-blue-50 mb-8">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-xl font-bold flex items-center gap-2 text-blue-800">
+              <Edit3 className="w-6 h-6 text-blue-600" /> עריכת קניה: 
+              <input type="text" value={editStoreName} onChange={e => setEditStoreName(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1 text-lg font-bold w-48 inline-block mx-2" />
+            </h2>
+            <div className="flex gap-2 items-center">
+               <label className="text-sm font-medium">מי שילם:</label>
+               <select value={editPayerId} onChange={e => setEditPayerId(e.target.value)} className="border rounded-lg p-1.5 text-sm bg-slate-50">
+                 {roommates.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+               </select>
+               <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1.5 rounded-xl font-bold">סה"כ: ₪{editItems.reduce((s, i) => s + Number(i.price || 0), 0).toFixed(2)}</span>
+            </div>
+          </div>
+
+          <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto mb-6 bg-slate-50 rounded-xl p-2">
+            {editItems.map((item, idx) => (
+              <div key={item.id || idx} className="py-3 px-2 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex-1 flex gap-2 items-center">
+                  <input type="text" value={item.name} onChange={e => updateEditItemName(idx, e.target.value)} className="border rounded-lg px-2 py-1 text-sm font-semibold flex-1" />
+                  <div className="relative w-28">
+                    <span className="absolute right-2 top-1.5 text-slate-400 text-sm">₪</span>
+                    <input type="number" step="0.1" value={item.price} onChange={e => updateEditItemPrice(idx, e.target.value)} className="border rounded-lg pr-6 pl-2 py-1 text-sm w-full font-bold" />
+                  </div>
+                </div>
+                <div className="flex gap-2 items-center justify-between">
+                  <div className="flex gap-1">
+                    <button onClick={() => updateEditItemCategory(idx, 'vegan')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'vegan' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 border'}`}>🌱 טבעוני</button>
+                    <button onClick={() => updateEditItemCategory(idx, 'non_vegan')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'non_vegan' ? 'bg-rose-600 text-white' : 'bg-white text-slate-600 border'}`}>🥩 מהחי</button>
+                    <button onClick={() => updateEditItemCategory(idx, 'general')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'general' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border'}`}>🧼 כללי</button>
+                  </div>
+                  <button onClick={() => removeEditItem(idx)} className="text-slate-400 hover:text-rose-600 p-1 mr-2"><Trash2 className="w-4 h-4" /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-3">
+            <button onClick={() => setEditingExpenseId(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition">ביטול</button>
+            <button onClick={saveEditedExpense} className="flex-2 w-2/3 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition shadow-sm">שמור שינויים וחשב חובות מחדש</button>
           </div>
         </section>
       )}
@@ -315,13 +431,22 @@ export default function Home() {
                   </div>
                   
                   <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-200">
-                    {expense.receipt_image_url ? (
-                      <a href={expense.receipt_image_url} target="_blank" rel="noreferrer" className="text-xs flex items-center gap-1 text-blue-600 hover:underline">
-                        <ImageIcon className="w-4 h-4" /> צפה בקבלה
-                      </a>
-                    ) : (
-                      <span className="text-xs text-slate-400">אין תמונה</span>
-                    )}
+                    <div className="flex gap-3 items-center">
+                      {expense.receipt_image_url ? (
+                        <a href={expense.receipt_image_url} target="_blank" rel="noreferrer" className="text-xs flex items-center gap-1 text-blue-600 hover:underline">
+                          <ImageIcon className="w-4 h-4" /> צפה בקבלה
+                        </a>
+                      ) : (
+                        <span className="text-xs text-slate-400">אין תמונה</span>
+                      )}
+                      
+                      <button 
+                        onClick={() => startEditingExpense(expense)}
+                        className="text-xs flex items-center gap-1 text-emerald-600 hover:text-emerald-700 font-medium transition"
+                      >
+                        <Edit3 className="w-4 h-4" /> ערוך פריטים
+                      </button>
+                    </div>
                     
                     <button 
                       onClick={() => deleteExpense(expense.id)}
