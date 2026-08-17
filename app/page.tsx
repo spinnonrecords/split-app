@@ -85,16 +85,41 @@ export default function Home() {
       return;
     }
 
-    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId: scanRecord.id }) }).catch(console.error); 
     setIsUploading(false);
     fetchQueue(); 
+
+    // שליחת הבקשה לשרת עם מנגנון פיקוח של הדפדפן
+    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId: scanRecord.id }) })
+      .then(async (res) => {
+        if (!res.ok) {
+          // אם השרת החזיר שגיאה 500 (גוגל קרס), הדפדפן מתערב ומעדכן את הסטטוס באותו רגע
+          await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
+          fetchQueue();
+        }
+      })
+      .catch(async () => {
+        // במקרה של קריסה מוחלטת
+        await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
+        fetchQueue();
+      });
   }
 
-  // פונקציה חדשה ששולחת סריקה מחדש אם היא נכשלה בעבר
   const retryScan = async (scanId: string) => {
     await supabase.from('receipt_scans').update({ status: 'pending' }).eq('id', scanId);
     fetchQueue();
-    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId }) }).catch(console.error);
+    
+    // אותו מנגנון פיקוח גם בניסיון חוזר
+    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId }) })
+      .then(async (res) => {
+        if (!res.ok) {
+          await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanId);
+          fetchQueue();
+        }
+      })
+      .catch(async () => {
+        await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanId);
+        fetchQueue();
+      });
   };
 
   const reviewScan = (scan: any) => {
