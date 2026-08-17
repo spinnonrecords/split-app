@@ -1,467 +1,80 @@
 'use client';
-
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { calculateSplits, Roommate, ReceiptItem } from '@/lib/split-logic';
-import { Upload, ShoppingBag, DollarSign, History, Trash2, Image as ImageIcon, Loader2, CheckCircle2, AlertCircle, RefreshCw, Edit3 } from 'lucide-react';
+import { calculateSplits } from '@/lib/split-logic';
+import { Upload, ShoppingBag, DollarSign, History, Trash2, ImageIcon, Loader2, CheckCircle2, AlertCircle, RefreshCw, Edit3, Save, X } from 'lucide-react';
 
 export default function Home() {
-  const [roommates, setRoommates] = useState<Roommate[]>([]);
-  const [payerId, setPayerId] = useState<string>('');
-  
-  const [isUploading, setIsUploading] = useState(false);
+  const [roommates, setRoommates] = useState<any[]>([]);
+  const [payerId, setPayerId] = useState('');
   const [scansQueue, setScansQueue] = useState<any[]>([]);
-  
-  const [activeScanId, setActiveScanId] = useState<string | null>(null);
-  const [storeName, setStoreName] = useState('');
-  const [items, setItems] = useState<ReceiptItem[]>([]);
-  const [receiptImageUrl, setReceiptImageUrl] = useState<string | null>(null);
-
-  // מצב עריכת קניה קיימת מההיסטוריה
-  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
-  const [editStoreName, setEditStoreName] = useState('');
-  const [editItems, setEditItems] = useState<any[]>([]);
-  const [editReceiptUrl, setEditReceiptUrl] = useState<string | null>(null);
-  const [editPayerId, setEditPayerId] = useState('');
-  
-  const [balances, setBalances] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
+  const [balances, setBalances] = useState<any[]>([]);
+  
+  // States לעריכה
+  const [editingExpense, setEditingExpense] = useState<any>(null);
+  const [editItems, setEditItems] = useState<any[]>([]);
 
   useEffect(() => {
-    fetchRoommates();
-    fetchBalances();
-    fetchHistory();
-    fetchQueue();
-
-    const interval = setInterval(fetchQueue, 5000);
+    loadData();
+    const interval = setInterval(loadData, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  async function fetchRoommates() {
-    const { data } = await supabase.from('roommates').select('*').order('created_at', { ascending: true });
-    if (data && data.length > 0) {
-      setRoommates(data);
-      setPayerId(data[0].id);
-    }
+  async function loadData() {
+    const [{ data: r }, { data: s }, { data: h }] = await Promise.all([
+      supabase.from('roommates').select('*'),
+      supabase.from('receipt_scans').select('*, payer:payer_id (name)'),
+      supabase.from('expenses').select(`*, payer:payer_id (name), items:expense_items (*)`)
+    ]);
+    setRoommates(r || []); setScansQueue(s || []); setHistory(h || []);
+    if (r?.length && !payerId) setPayerId(r[0].id);
   }
 
-  async function fetchQueue() {
-    const { data } = await supabase.from('receipt_scans').select('*, payer:payer_id ( name )').order('created_at', { ascending: false });
-    setScansQueue(data || []);
-  }
-
-  async function fetchBalances() {
-    const { data } = await supabase.from('debt_shares').select(`amount_owed, debtor:debtor_id ( name, is_vegan ), expense:expense_id ( payer:payer_id ( name, is_vegan ) )`);
-    const aggregatedBalances: Record<string, any> = {};
-    data?.forEach((b: any) => {
-      const debtorName = b.debtor?.name || 'לא ידוע';
-      const payerName = b.expense?.payer?.name || 'לא ידוע';
-      const key = `${debtorName}-${payerName}`;
-      if (!aggregatedBalances[key]) aggregatedBalances[key] = { ...b, amount_owed: 0 };
-      aggregatedBalances[key].amount_owed += Number(b.amount_owed);
-    });
-    setBalances(Object.values(aggregatedBalances).filter((b: any) => b.amount_owed > 0));
-  }
-
-  async function fetchHistory() {
-    const { data } = await supabase.from('expenses').select(`id, created_at, store_name, total_amount, receipt_image_url, payer_id, payer:payer_id ( name, is_vegan ), items:expense_items ( id, name, price, category )`).order('created_at', { ascending: false });
-    setHistory(data || []);
-  }
-
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !payerId) return;
-
-    setIsUploading(true);
-    const fileExt = file.name.split('.').pop();
-    const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const { error: uploadError } = await supabase.storage.from('receipts').upload(fileName, file);
-
-    if (uploadError) {
-      alert('שגיאה בהעלאת התמונה');
-      setIsUploading(false);
-      return;
-    }
-
-    const { data: { publicUrl } } = supabase.storage.from('receipts').getPublicUrl(fileName);
-    const { data: scanRecord, error: dbError } = await supabase.from('receipt_scans').insert({ payer_id: payerId, image_url: publicUrl, status: 'pending' }).select().single();
-
-    if (dbError || !scanRecord) {
-      alert('שגיאה ביצירת תור סריקה');
-      setIsUploading(false);
-      return;
-    }
-
-    setIsUploading(false);
-    fetchQueue(); 
-
-    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId: scanRecord.id }) })
-      .then(async (res) => {
-        if (!res.ok) {
-          await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
-          fetchQueue();
-        }
-      })
-      .catch(async () => {
-        await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanRecord.id);
-        fetchQueue();
-      });
-  }
-
-  const retryScan = async (scanId: string) => {
-    await supabase.from('receipt_scans').update({ status: 'pending' }).eq('id', scanId);
-    fetchQueue();
-    
-    fetch('/api/process-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scanId }) })
-      .then(async (res) => {
-        if (!res.ok) {
-          await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanId);
-          fetchQueue();
-        }
-      })
-      .catch(async () => {
-        await supabase.from('receipt_scans').update({ status: 'error' }).eq('id', scanId);
-        fetchQueue();
-      });
-  };
-
-  const reviewScan = (scan: any) => {
-    setActiveScanId(scan.id);
-    setPayerId(scan.payer_id);
-    setReceiptImageUrl(scan.image_url);
-    if (scan.result_data) {
-      setStoreName(scan.result_data.store_name || 'קנייה בסופר');
-      setItems(scan.result_data.items || []);
-    }
-  };
-
-  const discardScan = async (scanId: string) => {
-    if (!confirm('למחוק את הסריקה הזו?')) return;
-    await supabase.from('receipt_scans').delete().eq('id', scanId);
-    if (activeScanId === scanId) setActiveScanId(null);
-    fetchQueue();
-  };
-
-  const updateItemCategory = (index: number, category: ReceiptItem['category']) => {
-    const updated = [...items];
-    updated[index].category = category;
-    setItems(updated);
-  };
-
-  async function saveExpense() {
-    if (!payerId || items.length === 0 || !activeScanId) return;
-    const totalAmount = items.reduce((sum, item) => sum + Number(item.price), 0);
-    const { debts } = calculateSplits(items, roommates, payerId);
-
-    const { data: expense, error } = await supabase.from('expenses').insert({ payer_id: payerId, store_name: storeName, total_amount: totalAmount, receipt_image_url: receiptImageUrl }).select().single();
-    if (error || !expense) return alert('שגיאה בשמירת ההוצאה');
-
-    await supabase.from('expense_items').insert(items.map(item => ({ expense_id: expense.id, name: item.name, price: item.price, category: item.category })));
-    await supabase.from('debt_shares').insert(debts.map(d => ({ expense_id: expense.id, debtor_id: d.debtor_id, amount_owed: d.amount })));
-    await supabase.from('receipt_scans').delete().eq('id', activeScanId);
-
-    alert('✅ הקבלה אושרה ונשמרה בהצלחה!');
-    setActiveScanId(null);
-    setItems([]);
-    fetchBalances();
-    fetchHistory();
-    fetchQueue();
-  }
-
-  async function deleteExpense(expenseId: string) {
-    if (!confirm('האם למחוק הוצאה זו? פעולה זו תבטל את החובות הקשורים אליה.')) return;
-    await supabase.from('expenses').delete().eq('id', expenseId);
-    if (editingExpenseId === expenseId) setEditingExpenseId(null);
-    fetchBalances();
-    fetchHistory();
-  }
-
-  // פתיחת קניה קיימת לעריכה מההיסטוריה
-  const startEditingExpense = (expense: any) => {
-    setEditingExpenseId(expense.id);
-    setEditStoreName(expense.store_name);
-    setEditPayerId(expense.payer_id);
-    setEditReceiptUrl(expense.receipt_image_url);
-    setEditItems(expense.items ? [...expense.items] : []);
-  };
-
-  const updateEditItemCategory = (index: number, category: string) => {
-    const updated = [...editItems];
-    updated[index].category = category;
-    setEditItems(updated);
-  };
-
-  const updateEditItemPrice = (index: number, price: string) => {
-    const updated = [...editItems];
-    updated[index].price = price;
-    setEditItems(updated);
-  };
-
-  const updateEditItemName = (index: number, name: string) => {
-    const updated = [...editItems];
-    updated[index].name = name;
-    setEditItems(updated);
-  };
-
-  const removeEditItem = (index: number) => {
-    const updated = editItems.filter((_, i) => i !== index);
-    setEditItems(updated);
-  };
-
-  // שמירת השינויים בקניה קיימת (מחיקת חובות ישנים וחישוב מחדש)
   async function saveEditedExpense() {
-    if (!editingExpenseId || editItems.length === 0) return;
-
-    const totalAmount = editItems.reduce((sum, item) => sum + Number(item.price), 0);
-    const { debts } = calculateSplits(editItems, roommates, editPayerId);
-
-    // 1. עדכון פרטי ההוצאה הראשית
-    await supabase.from('expenses').update({
-      store_name: editStoreName,
-      total_amount: totalAmount,
-      payer_id: editPayerId
-    }).eq('id', editingExpenseId);
-
-    // 2. מחיקת הפריטים הישנים והחובות הישנים של הקניה הזו
-    await supabase.from('expense_items').delete().eq('expense_id', editingExpenseId);
-    await supabase.from('debt_shares').delete().eq('expense_id', editingExpenseId);
-
-    // 3. הכנסת הפריטים המעודכנים והחובות החדשים
-    await supabase.from('expense_items').insert(
-      editItems.map(item => ({ expense_id: editingExpenseId, name: item.name, price: item.price, category: item.category }))
-    );
-
-    await supabase.from('debt_shares').insert(
-      debts.map(d => ({ expense_id: editingExpenseId, debtor_id: d.debtor_id, amount_owed: d.amount }))
-    );
-
-    alert('✅ הקניה עודכנה בהצלחה!');
-    setEditingExpenseId(null);
-    fetchBalances();
-    fetchHistory();
+    const total = editItems.reduce((s, i) => s + Number(i.price), 0);
+    const { debts } = calculateSplits(editItems, roommates, editingExpense.payer_id);
+    await supabase.from('expenses').update({ total_amount: total }).eq('id', editingExpense.id);
+    await supabase.from('expense_items').delete().eq('expense_id', editingExpense.id);
+    await supabase.from('expense_items').insert(editItems.map(i => ({ expense_id: editingExpense.id, name: i.name, price: i.price, category: i.category })));
+    await supabase.from('debt_shares').delete().eq('expense_id', editingExpense.id);
+    await supabase.from('debt_shares').insert(debts.map(d => ({ expense_id: editingExpense.id, debtor_id: d.debtor_id, amount_owed: d.amount })));
+    setEditingExpense(null); loadData(); alert('עודכן!');
   }
 
   return (
-    <main className="max-w-4xl mx-auto p-4 md:p-8 font-sans text-slate-800" dir="rtl">
-      <header className="text-center mb-8">
-        <h1 className="text-3xl font-bold text-emerald-700">🛒 VeganSplit</h1>
-        <p className="text-slate-500 mt-1">חלוקת קניות חכמה ברקע 🌱</p>
-      </header>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 lg:col-span-2">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <Upload className="w-5 h-5 text-emerald-600" /> זרוק קבלה לתור
-          </h2>
-          <div className="flex flex-col md:flex-row gap-4 mb-4">
-            <div className="flex-1">
-              <label className="block text-sm font-medium mb-1">מי שילם?</label>
-              <select value={payerId} onChange={e => setPayerId(e.target.value)} className="w-full border rounded-xl p-2.5 bg-slate-50">
-                {roommates.map(r => <option key={r.id} value={r.id}>{r.name} {r.is_vegan ? '🌱' : ''}</option>)}
-              </select>
-            </div>
-            <div className="flex-1">
-              <label className="block text-sm font-medium mb-1">תמונת קבלה</label>
-              <input type="file" accept="image/*" onChange={handleFileUpload} disabled={isUploading}
-                className="w-full text-sm file:ml-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 disabled:opacity-50" />
-            </div>
+    <main className="max-w-4xl mx-auto p-4" dir="rtl">
+      <h1 className="text-3xl font-bold text-emerald-700 text-center mb-8">🛒 VeganSplit</h1>
+      
+      {/* תצוגת היסטוריה עם כפתור עריכה */}
+      <section className="bg-white p-6 rounded-2xl shadow-sm border mb-8">
+        <h2 className="text-lg font-semibold mb-4">היסטוריית קניות</h2>
+        {history.map(ex => (
+          <div key={ex.id} className="flex justify-between items-center p-3 border-b">
+            <span>{ex.store_name} - ₪{ex.total_amount}</span>
+            <button onClick={() => { setEditingExpense(ex); setEditItems(ex.items); }} className="text-emerald-600 flex items-center gap-1"><Edit3 size={16}/> ערוך</button>
           </div>
-          {isUploading && <p className="text-emerald-600 font-medium animate-pulse text-sm">מעלה את התמונה לשרת...</p>}
-        </section>
+        ))}
+      </section>
 
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 bg-slate-50/50">
-          <h2 className="text-lg font-semibold mb-4 flex items-center justify-between">
-            תור סריקות
-            <span className="bg-slate-200 text-slate-700 text-xs px-2 py-1 rounded-full">{scansQueue.length}</span>
-          </h2>
-          {scansQueue.length === 0 ? (
-            <p className="text-sm text-slate-400">התור ריק. הכל נקי! ✨</p>
-          ) : (
-            <div className="space-y-3 max-h-48 overflow-y-auto pr-1">
-              {scansQueue.map(scan => (
-                <div key={scan.id} className="p-3 bg-white rounded-xl border border-slate-200 shadow-sm flex items-center justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-slate-500 mb-1">{new Date(scan.created_at).toLocaleTimeString('he-IL')} • {scan.payer?.name}</p>
-                    
-                    {scan.status === 'pending' || scan.status === 'processing' ? (
-                      <div className="flex items-center gap-1 text-blue-600 text-sm font-medium"><Loader2 className="w-4 h-4 animate-spin" /> סורק...</div>
-                    ) : scan.status === 'error' ? (
-                      <div className="flex items-center gap-2">
-                        <span className="flex items-center gap-1 text-rose-600 text-sm font-medium"><AlertCircle className="w-4 h-4" /> שגיאה בסריקה</span>
-                        <button onClick={() => retryScan(scan.id)} className="text-xs bg-rose-100 text-rose-700 hover:bg-rose-200 px-2 py-1 rounded-md transition flex items-center gap-1">
-                          <RefreshCw className="w-3 h-3" /> נסה שוב
-                        </button>
-                      </div>
-                    ) : (
-                      <button onClick={() => reviewScan(scan)} className="flex items-center gap-1 text-emerald-600 hover:text-emerald-700 text-sm font-bold transition"><CheckCircle2 className="w-4 h-4" /> סריקה מוכנה! לחץ לאישור</button>
-                    )}
-                  </div>
-                  <button onClick={() => discardScan(scan.id)} className="text-slate-400 hover:text-rose-500 p-1"><Trash2 className="w-4 h-4" /></button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
-
-      {/* אזור אישור קבלה חדשה מהתור */}
-      {activeScanId && items.length > 0 && (
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-emerald-200 ring-2 ring-emerald-50 mb-8">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-xl font-bold flex items-center gap-2 text-emerald-800">
-              <ShoppingBag className="w-6 h-6 text-emerald-600" /> סקירה ואישור: {storeName}
-            </h2>
-            <div className="flex gap-2">
-               {receiptImageUrl && <a href={receiptImageUrl} target="_blank" rel="noreferrer" className="text-sm bg-slate-100 hover:bg-slate-200 px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition"><ImageIcon className="w-4 h-4" /> צפה בתמונה</a>}
-               <span className="text-sm bg-emerald-100 text-emerald-800 px-4 py-2 rounded-xl font-bold">סה"כ: ₪{items.reduce((s, i) => s + Number(i.price), 0).toFixed(2)}</span>
-            </div>
-          </div>
-
-          <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto mb-6 bg-slate-50 rounded-xl p-2">
-            {items.map((item, idx) => (
-              <div key={idx} className="py-3 px-2 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div className="flex-1">
-                  <p className="font-semibold text-sm">{item.name}</p>
-                  <p className="text-sm text-slate-600">₪{Number(item.price).toFixed(2)}</p>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => updateItemCategory(idx, 'vegan')} className={`px-3 py-1.5 text-xs rounded-lg font-bold transition ${item.category === 'vegan' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200'}`}>🌱 טבעוני</button>
-                  <button onClick={() => updateItemCategory(idx, 'non_vegan')} className={`px-3 py-1.5 text-xs rounded-lg font-bold transition ${item.category === 'non_vegan' ? 'bg-rose-600 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200'}`}>🥩 מהחי</button>
-                  <button onClick={() => updateItemCategory(idx, 'general')} className={`px-3 py-1.5 text-xs rounded-lg font-bold transition ${item.category === 'general' ? 'bg-blue-600 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200'}`}>🧼 כללי</button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex gap-3">
-            <button onClick={() => setActiveScanId(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition">סגור בינתיים</button>
-            <button onClick={saveExpense} className="flex-2 w-2/3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition shadow-sm">אשר קבלה וחלק חובות</button>
-          </div>
-        </section>
-      )}
-
-      {/* אזור עריכת קניה קיימת מההיסטוריה */}
-      {editingExpenseId && (
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-blue-200 ring-2 ring-blue-50 mb-8">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-xl font-bold flex items-center gap-2 text-blue-800">
-              <Edit3 className="w-6 h-6 text-blue-600" /> עריכת קניה: 
-              <input type="text" value={editStoreName} onChange={e => setEditStoreName(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1 text-lg font-bold w-48 inline-block mx-2" />
-            </h2>
-            <div className="flex gap-2 items-center">
-               <label className="text-sm font-medium">מי שילם:</label>
-               <select value={editPayerId} onChange={e => setEditPayerId(e.target.value)} className="border rounded-lg p-1.5 text-sm bg-slate-50">
-                 {roommates.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-               </select>
-               <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1.5 rounded-xl font-bold">סה"כ: ₪{editItems.reduce((s, i) => s + Number(i.price || 0), 0).toFixed(2)}</span>
-            </div>
-          </div>
-
-          <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto mb-6 bg-slate-50 rounded-xl p-2">
+      {/* מודל עריכה */}
+      {editingExpense && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white p-6 rounded-2xl w-full max-w-lg">
+            <h2 className="text-xl font-bold mb-4">עריכת {editingExpense.store_name}</h2>
             {editItems.map((item, idx) => (
-              <div key={item.id || idx} className="py-3 px-2 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div className="flex-1 flex gap-2 items-center">
-                  <input type="text" value={item.name} onChange={e => updateEditItemName(idx, e.target.value)} className="border rounded-lg px-2 py-1 text-sm font-semibold flex-1" />
-                  <div className="relative w-28">
-                    <span className="absolute right-2 top-1.5 text-slate-400 text-sm">₪</span>
-                    <input type="number" step="0.1" value={item.price} onChange={e => updateEditItemPrice(idx, e.target.value)} className="border rounded-lg pr-6 pl-2 py-1 text-sm w-full font-bold" />
-                  </div>
-                </div>
-                <div className="flex gap-2 items-center justify-between">
-                  <div className="flex gap-1">
-                    <button onClick={() => updateEditItemCategory(idx, 'vegan')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'vegan' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 border'}`}>🌱 טבעוני</button>
-                    <button onClick={() => updateEditItemCategory(idx, 'non_vegan')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'non_vegan' ? 'bg-rose-600 text-white' : 'bg-white text-slate-600 border'}`}>🥩 מהחי</button>
-                    <button onClick={() => updateEditItemCategory(idx, 'general')} className={`px-2.5 py-1 text-xs rounded-lg font-bold transition ${item.category === 'general' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border'}`}>🧼 כללי</button>
-                  </div>
-                  <button onClick={() => removeEditItem(idx)} className="text-slate-400 hover:text-rose-600 p-1 mr-2"><Trash2 className="w-4 h-4" /></button>
-                </div>
+              <div key={idx} className="flex gap-2 mb-2">
+                <input className="border p-1 rounded" value={item.name} onChange={(e) => { const n = [...editItems]; n[idx].name = e.target.value; setEditItems(n); }} />
+                <input className="border p-1 rounded w-20" type="number" value={item.price} onChange={(e) => { const n = [...editItems]; n[idx].price = e.target.value; setEditItems(n); }} />
               </div>
             ))}
+            <div className="flex gap-2 mt-4">
+              <button onClick={saveEditedExpense} className="bg-emerald-600 text-white px-4 py-2 rounded">שמור</button>
+              <button onClick={() => setEditingExpense(null)} className="bg-slate-200 px-4 py-2 rounded">ביטול</button>
+            </div>
           </div>
-
-          <div className="flex gap-3">
-            <button onClick={() => setEditingExpenseId(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-3 rounded-xl transition">ביטול</button>
-            <button onClick={saveEditedExpense} className="flex-2 w-2/3 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition shadow-sm">שמור שינויים וחשב חובות מחדש</button>
-          </div>
-        </section>
+        </div>
       )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-emerald-600" />
-            מאזן חובות כולל
-          </h2>
-          {balances.length === 0 ? (
-            <p className="text-sm text-slate-400">הכל מקוזז, אין חובות! 🎉</p>
-          ) : (
-            <div className="space-y-3">
-              {balances.map((b, i) => (
-                <div key={i} className="flex justify-between items-center p-3 bg-rose-50 rounded-xl text-sm border border-rose-100">
-                  <span>
-                    <strong className="text-slate-900">{b.debtor?.name}</strong> חייב/ת ל-
-                    <strong className="text-slate-900">{b.expense?.payer?.name}</strong>
-                  </span>
-                  <span className="font-bold text-rose-600">₪{Number(b.amount_owed).toFixed(2)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <History className="w-5 h-5 text-emerald-600" />
-            היסטוריית קניות
-          </h2>
-          {history.length === 0 ? (
-            <p className="text-sm text-slate-400">אין עדיין קניות בהיסטוריה.</p>
-          ) : (
-            <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
-              {history.map(expense => (
-                <div key={expense.id} className="p-4 bg-slate-50 border border-slate-100 rounded-xl">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <h3 className="font-semibold text-slate-800">{expense.store_name}</h3>
-                      <p className="text-xs text-slate-500">
-                        {new Date(expense.created_at).toLocaleDateString('he-IL')} • {expense.payer?.name} שילם/ה
-                      </p>
-                    </div>
-                    <span className="font-bold text-emerald-600">₪{Number(expense.total_amount).toFixed(2)}</span>
-                  </div>
-                  
-                  <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-200">
-                    <div className="flex gap-3 items-center">
-                      {expense.receipt_image_url ? (
-                        <a href={expense.receipt_image_url} target="_blank" rel="noreferrer" className="text-xs flex items-center gap-1 text-blue-600 hover:underline">
-                          <ImageIcon className="w-4 h-4" /> צפה בקבלה
-                        </a>
-                      ) : (
-                        <span className="text-xs text-slate-400">אין תמונה</span>
-                      )}
-                      
-                      <button 
-                        onClick={() => startEditingExpense(expense)}
-                        className="text-xs flex items-center gap-1 text-emerald-600 hover:text-emerald-700 font-medium transition"
-                      >
-                        <Edit3 className="w-4 h-4" /> ערוך פריטים
-                      </button>
-                    </div>
-                    
-                    <button 
-                      onClick={() => deleteExpense(expense.id)}
-                      className="text-xs flex items-center gap-1 text-slate-500 hover:text-rose-600 transition"
-                      title="מחק הוצאה (יבטל את החובות שלה)"
-                    >
-                      <Trash2 className="w-4 h-4" /> מחק / בטל
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
     </main>
   );
 }
