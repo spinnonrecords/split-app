@@ -205,7 +205,7 @@ async function fetchBalances() {
             </div>
             <div className="flex-1">
               <label className="block text-sm font-medium mb-1">תמונת קבלה</label>
-              <input type="file" accept="image/*" capture="environment" onChange={handleFileUpload} disabled={isUploading}
+              <input type="file" accept="image/*" onChange={handleFileUpload} disabled={isUploading}
                 className="w-full text-sm file:ml-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 disabled:opacity-50" />
             </div>
           </div>
